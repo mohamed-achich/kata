@@ -29,7 +29,7 @@ async function updateDataset(db) {
     if (updateResult.nModified) {
       metrics.updatedCount = updateResult.nModified;
     }
-    if (updateResult.upsertedCount) {
+    if (updateResult.nUpserted) {
       metrics.addedCount = updateResult.nUpserted;
     }
   }
@@ -37,7 +37,13 @@ async function updateDataset(db) {
     fs.createReadStream(catalogUpdateFile)
       .pipe(csv())
       .on("data", (row) => {
-        const product = new Product({ row });
+        const product = new Product( 
+          row._id,
+          row.label,
+          row.price,
+          row.createdAt,
+          row.updatedAt
+         );
         products.push(product);
         productIds.add(product._id);
       })
@@ -53,7 +59,6 @@ async function updateDataset(db) {
         const bulkWriteResult = await db
           .collection("Products")
           .bulkWrite(bulkOps);
-        console.log(bulkWriteResult);
         updateMetrics(bulkWriteResult);
         const dbIds = (
           await db.collection("Products").find({}, { _id: 1 }).toArray()
@@ -63,7 +68,6 @@ async function updateDataset(db) {
           const deleteResult = await db
             .collection("Products")
             .deleteMany({ _id: { $in: deletedProductIds } });
-          console.log(deleteResult);
 
           metrics.deletedCount = deleteResult.deletedCount;
         }
