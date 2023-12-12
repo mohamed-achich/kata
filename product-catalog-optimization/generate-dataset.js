@@ -103,7 +103,14 @@ function generateUpdate(product, index, catalogSize) {
   if (rand < productEvent.pDelete) {
     // [0; pDelete[
     // Delete product
-    return null;
+    return new Product(
+      product._id,
+      `Product_${index + catalogSize}`,
+      generatePrice(),
+      product.createdAt,
+      product.createdAt,
+      new Date()
+    );
   }
   if (rand < productEvent.pDelete + productEvent.pUpdate) {
     // [pDelete; pUpdate[
@@ -127,7 +134,7 @@ function generateUpdate(product, index, catalogSize) {
 }
 
 async function writeProductUpdateToCsv(product, updatedProduct) {
-  if (updatedProduct) {
+  if (updatedProduct && !updatedProduct.deletedAt) {
     if (updatedProduct._id === product._id) {
       // Updated product or no modification => add this line
       // removed blocking operations
@@ -137,10 +144,6 @@ async function writeProductUpdateToCsv(product, updatedProduct) {
         ? Metrics.updated()
         : Metrics.zero();
     } else {
-      // keep product
-      // removed blocking operations
-      stream.write(product.toCsv() + "\n");
-
       // add new product
       // removed blocking operations
 
@@ -148,6 +151,7 @@ async function writeProductUpdateToCsv(product, updatedProduct) {
       return Metrics.added();
     }
   } else {
+    stream.write(updatedProduct.toCsv() + "\n");
     return Metrics.deleted();
   }
 }

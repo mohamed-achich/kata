@@ -22,8 +22,8 @@ async function main() {
 
 async function updateDataset(db) {
   const metrics = Metrics.zero();
-  const products = [];
-  const productIds = new Set();
+  let bulkOps = [];
+  let rows = 0;
 
   function updateMetrics(updateResult) {
     if (updateResult.nModified) {
@@ -32,47 +32,51 @@ async function updateDataset(db) {
     if (updateResult.nUpserted) {
       metrics.addedCount = updateResult.nUpserted;
     }
+    if (updateResult.nRemoved) {
+      metrics.deletedCount = updateResult.nRemoved;
+    }
   }
   await new Promise((resolve, reject) => {
     fs.createReadStream(catalogUpdateFile)
       .pipe(csv())
-      .on("data", (row) => {
-        const product = new Product( 
+      .on("data", async (row) => {
+        const product = new Product(
           row._id,
           row.label,
           row.price,
           row.createdAt,
-          row.updatedAt
-         );
-        products.push(product);
-        productIds.add(product._id);
+          row.updatedAt,
+          row.deletedAt ? row.deletedAt : null
+        );
+        if (product.deletedAt) {
+          bulkOps.push({ deleteOne: { filter: { _id: product._id } } });
+        } else {
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: product._id },
+              update: { $set: product },
+              upsert: true,
+            },
+          });
+        }
+        rows++;
+        if (bulkOps.length === 100000) {
+          const bulkWriteResult = await db
+            .collection("Products")
+            .bulkWrite(bulkOps);
+          console.log(`[INFO] Processed ${rows} CSV rows.`);
+          updateMetrics(bulkWriteResult);
+          bulkOps = [];
+        }
       })
       .on("end", async () => {
-        // todo
-        const bulkOps = products.map((product) => ({
-          updateOne: {
-            filter: { _id: product._id },
-            update: { $set: product },
-            upsert: true,
-          },
-        }));
-        const bulkWriteResult = await db
-          .collection("Products")
-          .bulkWrite(bulkOps);
-        updateMetrics(bulkWriteResult);
-        const dbIds = (
-          await db.collection("Products").find({}, { _id: 1 }).toArray()
-        ).map((o) => o._id);
-        const deletedProductIds = dbIds.filter((id) => !productIds.has(id));
-        if (deletedProductIds.length > 0) {
-          const deleteResult = await db
+        if (bulkOps.length > 0) {
+          const bulkWriteResult = await db
             .collection("Products")
-            .deleteMany({ _id: { $in: deletedProductIds } });
-
-          metrics.deletedCount = deleteResult.deletedCount;
+            .bulkWrite(bulkOps);
+          updateMetrics(bulkWriteResult);
         }
-
-        logMetrics(products.length, metrics);
+        logMetrics(rows, metrics);
         resolve();
       })
       .on("error", reject);
