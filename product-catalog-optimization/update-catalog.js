@@ -1,72 +1,78 @@
-const fs = require('fs');
-const { MongoClient } = require('mongodb');
-const Promise = require('bluebird');
+const fs = require("fs");
+const csv = require("csv-parser");
 
-const { memory } = require('./helpers/memory');
-const { timing } = require('./helpers/timing');
-const { Metrics } = require('./helpers/metrics');
-const { Product } = require('./product');
+const { MongoClient } = require("mongodb");
 
-const MONGO_URL = 'mongodb://localhost:27017/test-product-catalog';
-const catalogUpdateFile = 'updated-catalog.csv';
+const { memory } = require("./helpers/memory");
+const { timing } = require("./helpers/timing");
+const { Metrics } = require("./helpers/metrics");
+const { Product } = require("./product");
+
+const MONGO_URL = "mongodb://localhost:27017/test-product-catalog";
+const catalogUpdateFile = "updated-catalog.csv";
 
 async function main() {
   const mongoClient = new MongoClient(MONGO_URL);
   const connection = await mongoClient.connect();
   const db = connection.db();
-  await memory(
-    'Update dataset',
-    () => timing(
-      'Update dataset',
-      () => updateDataset(db)));
+  await memory("Update dataset", () =>
+    timing("Update dataset", () => updateDataset(db))
+  );
 }
 
 async function updateDataset(db) {
-  const csvContent = fs.readFileSync(catalogUpdateFile, 'utf-8');
-  const rowsWithHeader = csvContent.split('\n');
-  const dataRows = rowsWithHeader.slice(1);// skip headers
-
   const metrics = Metrics.zero();
+  const products = [];
+  const productIds = new Set();
+
   function updateMetrics(updateResult) {
-    if (updateResult.modifiedCount) {
-      metrics.updatedCount += 1;
+    if (updateResult.nModified) {
+      metrics.updatedCount = updateResult.nModified;
     }
     if (updateResult.upsertedCount) {
-      metrics.addedCount += 1;
+      metrics.addedCount = updateResult.nUpserted;
     }
   }
+  await new Promise((resolve, reject) => {
+    fs.createReadStream(catalogUpdateFile)
+      .pipe(csv())
+      .on("data", (row) => {
+        const product = new Product({ row });
+        products.push(product);
+        productIds.add(product._id);
+      })
+      .on("end", async () => {
+        // todo
+        const bulkOps = products.map((product) => ({
+          updateOne: {
+            filter: { _id: product._id },
+            update: { $set: product },
+            upsert: true,
+          },
+        }));
+        const bulkWriteResult = await db
+          .collection("Products")
+          .bulkWrite(bulkOps);
+        console.log(bulkWriteResult);
+        updateMetrics(bulkWriteResult);
+        const dbIds = (
+          await db.collection("Products").find({}, { _id: 1 }).toArray()
+        ).map((o) => o._id);
+        const deletedProductIds = dbIds.filter((id) => !productIds.has(id));
+        if (deletedProductIds.length > 0) {
+          const deleteResult = await db
+            .collection("Products")
+            .deleteMany({ _id: { $in: deletedProductIds } });
+          console.log(deleteResult);
 
-  const dbCatalogSize = await db.collection('Products').count();
-  const closestPowOf10 = 10**(Math.ceil(Math.log10(dbCatalogSize)));
-  function logProgress(nbCsvRows) {
-    const progressIndicator = nbCsvRows * 100 / closestPowOf10;
-    if (progressIndicator%10 === 0) {
-      console.debug(`[DEBUG] Processed ${nbCsvRows} rows...`);
-    }
-  }
+          metrics.deletedCount = deleteResult.deletedCount;
+        }
 
-  const products = dataRows.filter(dataRow => dataRow).map(row => Product.fromCsv(row));
-  await Promise.map(products, async (product, i) => {
-    const updateResult = await db.collection('Products')
-      .updateOne(
-        { _id: product._id },
-        { $set: product },
-        { upsert: true });
-    updateMetrics(updateResult);
-    logProgress(i);
+        logMetrics(products.length, metrics);
+        resolve();
+      })
+      .on("error", reject);
   });
-
-  const dbIds = (await db.collection('Products').find({}, {_id: 1}).toArray()).map(o => o._id);
-  const isDeletedId = id => !products.find(p => p._id === id);
-  const deletedProductIds = dbIds.filter(id => isDeletedId(id));
-  for (const pId of deletedProductIds) {
-    const deleteResult = await db.collection('Products').deleteOne({_id: pId});
-    if (deleteResult.deletedCount) {
-      metrics.deletedCount += 1;
-    }
-  }
-
-  logMetrics(dataRows.length-1, metrics);// dataRows.length-1 because there is a new line at the end of file.
 }
 
 function logMetrics(numberOfProcessedRows, metrics) {
@@ -79,11 +85,11 @@ function logMetrics(numberOfProcessedRows, metrics) {
 if (require.main === module) {
   main()
     .then(() => {
-      console.log('SUCCESS');
+      console.log("SUCCESS");
       process.exit(0);
     })
-    .catch(err => {
-      console.log('FAIL');
+    .catch((err) => {
+      console.log("FAIL");
       console.error(err);
       process.exit(1);
     });
